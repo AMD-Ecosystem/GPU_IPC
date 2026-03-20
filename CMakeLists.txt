@@ -135,6 +135,8 @@ target_compile_options(gipc PRIVATE
         --extended-lambda        # Enable extended lambda support
         --expt-relaxed-constexpr # Enable relaxed constexpr support
         --default-stream=per-thread  # Use per-thread default stream
+        -DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING  # Suppress MSVC preprocessor warning in CUDA headers
+        -Xcompiler="/Zc:preprocessor"                     # Ask MSVC to use standard-conforming preprocessor
     >
 )
 
