@@ -274,7 +274,7 @@ bool tetrahedra_obj::load_triMesh(const std::string& filename, double scale, dou
         }
     }
     triangleNum = triangles.size();
-    vertexOffset += vertexNum;
+    vertexOffset = vertexNum;
     softNum = targetIndex.size();
 
     std::set<std::pair<int, int>>                   edge_set;

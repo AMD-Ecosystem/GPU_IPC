@@ -931,12 +931,13 @@ namespace __GEIGEN__ {
 
 		for (int i = 0;i < dim; i++)
 		{
-			if (abs(mat[i][i]) < eps)
+            if(__mabs(mat[i][i]) < eps)
 			{
 				int j;
 				for (j = i + 1; j < dim; j++)
 				{
-					if (abs(mat[j][i]) > eps) break;
+                    if(__mabs(mat[j][i]) > eps)
+                        break;
 				}
 				if (j == dim) return;
 				for (int r = i; r < 2 * dim; r++)
@@ -1003,12 +1004,12 @@ namespace __GEIGEN__ {
 
 		for (int i = 0;i < dim; i++)
 		{
-			if (abs(mat[i][i]) < eps)
+			if (__mabs(mat[i][i]) < eps)
 			{
 				int j;
 				for (j = i + 1; j < dim; j++)
 				{
-					if (abs(mat[j][i]) > eps) break;
+					if (__mabs(mat[j][i]) > eps) break;
 				}
 				if (j == dim) return;
 				for (int r = i; r < 2 * dim; r++)
@@ -1223,13 +1224,13 @@ namespace __GEIGEN__ {
 		double C = c * c - 3 * b * d;
 		double delta = B * B - 4 * A * C;
 		num_solutions = 0;
-		if (abs(A) < EPS * EPS && abs(B) < EPS * EPS) {
+		if (__mabs(A) < EPS * EPS && __mabs(B) < EPS * EPS) {
 			results[0] = -b / 3.0 / a;
 			results[1] = results[0];
 			results[2] = results[0];
 			num_solutions = 3;
 		}
-		else if (abs(delta) <= EPS * EPS) {
+		else if (__mabs(delta) <= EPS * EPS) {
 			double K = B / A;
 			results[0] = -b / a + K;
 			results[1] = -K / 2.0;
