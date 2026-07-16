@@ -5,6 +5,12 @@
 // created by Kemeng Huang on 2022/12/01
 // Copyright (c) 2024 Kemeng Huang. All rights reserved.
 //
+// GPU preconditioned conjugate gradient solver for the IPC Newton system.
+//
+//   PCG_Data        - device workspace (vectors, preconditioner, scalars)
+//   PCG_Process     - classic PCG with the block-Jacobi (3x3) preconditioner
+//   MASPCG_Process  - PCG with the MAS preconditioner
+//
 
 #pragma once
 #ifndef _PCG_SOLVER_CUH_
@@ -14,48 +20,20 @@
 #include <cstdint>
 #include "MASPreconditioner.cuh"
 
-//class BHessian {
-//public:
-//	uint32_t* D1Index;//pIndex, DpeIndex, DptIndex;
-//	uint3* D3Index;
-//	uint4* D4Index;
-//	uint2* D2Index;
-//	__GEIGEN__::Matrix12x12d* H12x12;
-//	__GEIGEN__::Matrix3x3d* H3x3;
-//	__GEIGEN__::Matrix6x6d* H6x6;
-//	__GEIGEN__::Matrix9x9d* H9x9;
-//
-//    __GEIGEN__::Matrix12x12d* hH12x12;
-//    __GEIGEN__::Matrix3x3d* hH3x3;
-//    __GEIGEN__::Matrix6x6d* hH6x6;
-//    __GEIGEN__::Matrix9x9d* hH9x9;
-//
-//	uint32_t DNum[4];
-//
-//public:
-//	BHessian() {}
-//	~BHessian() {};
-//	void updateDNum(const int& tri_Num, const int& tet_number, const uint32_t* cpNums, const uint32_t* last_cpNums);
-//	void MALLOC_DEVICE_MEM_O(const int& tet_number, const int& surfvert_number, const int& surface_number, const int& edge_number);
-//	void FREE_DEVICE_MEM();
-//	//void init(const int& edgeNum, const int& faceNum, const int& vertNum);
-//};
-
 class PCG_Data {
 public:
-	double* squeue;
-	double3* b;
-	__GEIGEN__::Matrix3x3d* P;
-	double3* r;
-	double3* c;
-	double3* q;
-	double3* s;
-	double3* z;
-	double3* dx;
-	double3* tempDx;
+	double* squeue;                 // partial-sum queue for reductions
+	double3* b;                     // right-hand side (owned by caller)
+	__GEIGEN__::Matrix3x3d* P;      // block-Jacobi preconditioner blocks
+	double3* r;                     // residual
+	double3* c;                     // search direction
+	double3* q;                     // A * c
+	double3* s;                     // preconditioned residual
+	double3* z;                     // initial guess workspace
+	double3* dx;                    // solution increment
 
-	double3* filterTempVec3;
-	double3* preconditionTempVec3;
+	double3* filterTempVec3;        // scratch for the constraint filter (MAS)
+	double3* preconditionTempVec3;  // scratch for preconditioner output (MAS)
 	MASPreconditioner MP;
 
 	int P_type;
