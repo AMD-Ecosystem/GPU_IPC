@@ -657,23 +657,19 @@ __global__ void __inverse2_P96x96(__GEIGEN__::Matrix96x96T*  PMas,
         PMas[matId].m[i][i] = 1;
     }
 
-    gipc::SYNC_THREADS();
-    gipc::THREAD_FENCE();
-
     int         j = 0;
     Precision_T rt;
 
     while(j < (BANKSIZE * 3))
     {
         gipc::SYNC_THREADS();
-        gipc::THREAD_FENCE();
 
         rt = PMas[matId].m[j][j];
 
         colm[block_matId][i] = PMas[matId].m[i][j];
 
         gipc::SYNC_THREADS();
-        gipc::THREAD_FENCE();
+
         if(i == j)
         {
 
@@ -684,20 +680,16 @@ __global__ void __inverse2_P96x96(__GEIGEN__::Matrix96x96T*  PMas,
             PMas[matId].m[i][j] = 0;
         }
         gipc::SYNC_THREADS();
-        gipc::THREAD_FENCE();
 
         PMas[matId].m[j][i] /= rt;
 
         gipc::SYNC_THREADS();
-        gipc::THREAD_FENCE();
+
         for(int k = 0; k < (BANKSIZE * 3); k++)
         {
             if(k != j)
             {
                 Precision_T rate = -colm[block_matId][k];
-                gipc::SYNC_THREADS();
-                gipc::THREAD_FENCE();
-
                 PMas[matId].m[k][i] += rate * PMas[matId].m[j][i];
             }
         }
@@ -705,14 +697,6 @@ __global__ void __inverse2_P96x96(__GEIGEN__::Matrix96x96T*  PMas,
         j++;
     }
     gipc::SYNC_THREADS();
-    gipc::THREAD_FENCE();
-    if(i % 3 < 2)
-        PMas[matId].m[i + 1][i] = PMas[matId].m[i][i + 1];
-    else
-        PMas[matId].m[i][i - 2] = PMas[matId].m[i - 2][i];
-    gipc::SYNC_THREADS();
-    gipc::THREAD_FENCE();
-
 
     for(int j = 0; j < (BANKSIZE * 3); j++)
     {
@@ -790,75 +774,6 @@ __global__ void __inverse3_P96x96(__GEIGEN__::Matrix96x96T*  P96,
         rt = P96[matId].m[j][j];
     }
 }
-
-
-//__global__ void __inverse2_P96x96(__GEIGEN__::Matrix96x96d* P96, __GEIGEN__::Matrix96x96T* invP96, int numbers) {
-//  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-//  if (idx >= numbers) return;
-//
-//  int matId = idx / 96;
-//  int i = idx % 96;
-//  //int localMatId = threadIdx.x / 96;
-//
-//  for (int j = 0; j < 96; j++)
-//  {
-//      if (i == j) {
-//          invP96[matId].m[j][i] = 1;
-//          if (P96[matId].m[j][i] == 0) {
-//              P96[matId].m[j][i] = 1;
-//          }
-//      }
-//      else {
-//          invP96[matId].m[j][i] = 0;
-//      }
-//  }
-//  gipc::SYNC_THREADS();
-//  //__shared__ int loopId[3];
-//  //__shared__ double tempRate[3];
-//
-//  //if (i == 0) {
-//  //  loopId[localMatId] = 0;
-//  //  tempRate[localMatId] = P96[matId].m[0][0];
-//  //}
-//  int j = 0;
-//  Precision_T rt = P96[matId].m[0][0];
-//  gipc::SYNC_THREADS();
-//  while (/*loopId[localMatId]*/j < 96) {
-//
-//      //const int j = loopId[localMatId];
-//      //const double rt = tempRate;//tempRate[localMatId];
-//      if (i >= j) {
-//          P96[matId].m[j][i] /= rt;
-//      }
-//      if (i <= j) {
-//          invP96[matId].m[j][i] /= rt;
-//      }
-//      gipc::SYNC_THREADS();
-//      Precision_T rate = -P96[matId].m[i][j];
-//      for (int k = 0; k < 96; k++) {
-//          if (i != j) {
-//
-//              //gipc::SYNC_THREADS();
-//              if (k <= i) {
-//                  invP96[matId].m[i][k] += rate * invP96[matId].m[j][k];
-//              }
-//              if (k >= j) {
-//                  P96[matId].m[i][k] += rate * P96[matId].m[j][k];
-//              }
-//          }
-//      }
-//
-//      gipc::SYNC_THREADS();
-//      //if (i == 0) {
-//      //  loopId[localMatId]++;
-//      //  tempRate[localMatId] = P96[matId].m[j + 1][j + 1];
-//      //}
-//      j++;
-//      rt = P96[matId].m[j][j];
-//      //gipc::SYNC_THREADS();
-//  }
-//}
-
 
 
 __global__ void __buildMultiLevelR_optimized(const double3* _R,
