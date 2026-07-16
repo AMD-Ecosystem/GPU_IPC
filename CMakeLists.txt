@@ -138,6 +138,16 @@ target_compile_options(gipc PRIVATE
     >
 )
 
+# CUDA 13.x CCCL headers require MSVC's standard-conforming preprocessor.
+# Pass /Zc:preprocessor both to cl.exe (C++ files) and to nvcc's host
+# compiler pass (CUDA files) to avoid fatal error C1189.
+if(MSVC)
+    target_compile_options(gipc PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+    )
+endif()
+
 # =============================================================================
 # IDE Support and Organization
 # =============================================================================
