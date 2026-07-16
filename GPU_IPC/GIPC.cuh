@@ -201,13 +201,6 @@ public:
 	void sortMesh(device_TetraData& TetMesh, int updateVertNum);
 	void buildFrictionSets();
 
-
-	bool Inverse_Physics(device_TetraData& TetMesh);
-	void computeInverseHessian(device_TetraData& TetMesh);
-	void computeGroundHessian(double3* _gradient);
-	void computeInverseGradient(device_TetraData& TetMesh);
-	void computeFldm(double3* _deltaPos, double3* fldm);
-
 };
 
 #endif

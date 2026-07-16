@@ -99,6 +99,124 @@ __device__ __host__ inline uint32_t hash_code(
     //return mchash;
 }
 
+// =============================================================================
+// Block-reduction device helpers
+//
+// Warp-shuffle reduction of `temp` across the whole block; the per-block
+// partial result is written to out[blockIdx.x]. `number` is the number of
+// active elements in the (possibly partial) last block.
+//
+// This is the exact epilogue previously copy-pasted into every reduction
+// kernel in this file (sum / max / max-double2 variants); behavior unchanged.
+// =============================================================================
+
+template <typename Combine>
+__device__ __forceinline__ void __blockReduce(double temp, double* tep, double* out, int number, Combine combine)
+{
+    int idof    = blockIdx.x * blockDim.x;
+    int warpTid = threadIdx.x % 32;
+    int warpId  = (threadIdx.x >> 5);
+    int warpNum;
+    if(blockIdx.x == gridDim.x - 1)
+    {
+        warpNum = ((number - idof + 31) >> 5);
+    }
+    else
+    {
+        warpNum = ((blockDim.x) >> 5);
+    }
+    for(int i = 1; i < 32; i = (i << 1))
+    {
+        double other = gipc::WARP_SHFL_DOWN(temp, i);
+        temp         = combine(temp, other);
+    }
+    if(warpTid == 0)
+    {
+        tep[warpId] = temp;
+    }
+    gipc::SYNC_THREADS();
+    if(threadIdx.x < warpNum)
+    {
+        if(warpNum > 1)
+        {
+            temp = tep[threadIdx.x];
+            for(int i = 1; i < warpNum; i = (i << 1))
+            {
+                double other = gipc::WARP_SHFL_DOWN(temp, i);
+                temp         = combine(temp, other);
+            }
+        }
+        if(threadIdx.x == 0)
+        {
+            out[blockIdx.x] = temp;
+        }
+    }
+}
+
+struct __reduce_sum {
+    __device__ __forceinline__ double operator()(double a, double b) const { return a + b; }
+};
+
+struct __reduce_max {
+    __device__ __forceinline__ double operator()(double a, double b) const { return __m_max(a, b); }
+};
+
+__device__ __forceinline__ void __blockReduceSum(double temp, double* tep, double* out, int number)
+{
+    __blockReduce(temp, tep, out, number, __reduce_sum());
+}
+
+__device__ __forceinline__ void __blockReduceMax(double temp, double* tep, double* out, int number)
+{
+    __blockReduce(temp, tep, out, number, __reduce_max());
+}
+
+__device__ __forceinline__ void __blockReduceMax2(double2 temp, double2* sdata, double2* out, int number)
+{
+    int idof    = blockIdx.x * blockDim.x;
+    int warpTid = threadIdx.x % 32;
+    int warpId  = (threadIdx.x >> 5);
+    int warpNum;
+    if(blockIdx.x == gridDim.x - 1)
+    {
+        warpNum = ((number - idof + 31) >> 5);
+    }
+    else
+    {
+        warpNum = ((blockDim.x) >> 5);
+    }
+    for(int i = 1; i < 32; i = (i << 1))
+    {
+        double tempMin = gipc::WARP_SHFL_DOWN(temp.x, i);
+        double tempMax = gipc::WARP_SHFL_DOWN(temp.y, i);
+        temp.x         = __m_max(temp.x, tempMin);
+        temp.y         = __m_max(temp.y, tempMax);
+    }
+    if(warpTid == 0)
+    {
+        sdata[warpId] = temp;
+    }
+    gipc::SYNC_THREADS();
+    if(threadIdx.x < warpNum)
+    {
+        if(warpNum > 1)
+        {
+            temp = sdata[threadIdx.x];
+            for(int i = 1; i < warpNum; i = (i << 1))
+            {
+                double tempMin = gipc::WARP_SHFL_DOWN(temp.x, i);
+                double tempMax = gipc::WARP_SHFL_DOWN(temp.y, i);
+                temp.x         = __m_max(temp.x, tempMin);
+                temp.y         = __m_max(temp.y, tempMax);
+            }
+        }
+        if(threadIdx.x == 0)
+        {
+            out[blockIdx.x] = temp;
+        }
+    }
+}
+
 __global__ void _calcTetMChash(uint64_t*       _MChash,
                                const double3*  _vertexes,
                                uint4*          tets,
@@ -298,108 +416,9 @@ __global__ void _reduct_max_double3_to_double(const double3* _double3Dim, double
     double temp =
         __m_max(__m_max(abs(tempMove.x), abs(tempMove.y)), abs(tempMove.z));
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-        temp           = __m_max(temp, tempMin);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-            temp           = __m_max(temp, tempMin);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        _double1Dim[blockIdx.x] = temp;
-    }
+    __blockReduceMax(temp, tep, _double1Dim, number);
 }
 
-__global__ void _reduct_min_double(double* _double1Dim, int number)
-{
-    int idof = blockIdx.x * blockDim.x;
-    int idx  = threadIdx.x + idof;
-
-    extern __shared__ double tep[];
-
-    if(idx >= number)
-        return;
-    //int cfid = tid + CONFLICT_FREE_OFFSET(tid);
-    double temp = _double1Dim[idx];
-
-    gipc::THREAD_FENCE();
-
-
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-        temp           = __m_min(temp, tempMin);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-            temp           = __m_min(temp, tempMin);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        _double1Dim[blockIdx.x] = temp;
-    }
-}
 
 __global__ void _reduct_M_double2(double2* _double2Dim, int number)
 {
@@ -416,53 +435,9 @@ __global__ void _reduct_M_double2(double2* _double2Dim, int number)
     gipc::THREAD_FENCE();
 
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMin = gipc::WARP_SHFL_DOWN(temp.x, i);
-        double tempMax = gipc::WARP_SHFL_DOWN(temp.y, i);
-        temp.x         = __m_max(temp.x, tempMin);
-        temp.y         = __m_max(temp.y, tempMax);
-    }
-    if(warpTid == 0)
-    {
-        sdata[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = sdata[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMin = gipc::WARP_SHFL_DOWN(temp.x, i);
-            double tempMax = gipc::WARP_SHFL_DOWN(temp.y, i);
-            temp.x         = __m_max(temp.x, tempMin);
-            temp.y         = __m_max(temp.y, tempMax);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        _double2Dim[blockIdx.x] = temp;
-    }
+    __blockReduceMax2(temp, sdata, _double2Dim, number);
 }
+
 
 __global__ void _reduct_max_double(double* _double1Dim, int number)
 {
@@ -479,49 +454,9 @@ __global__ void _reduct_max_double(double* _double1Dim, int number)
     gipc::THREAD_FENCE();
 
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMax = gipc::WARP_SHFL_DOWN(temp, i);
-        temp           = __m_max(temp, tempMax);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMax = gipc::WARP_SHFL_DOWN(temp, i);
-            temp           = __m_max(temp, tempMax);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        _double1Dim[blockIdx.x] = temp;
-    }
+    __blockReduceMax(temp, tep, _double1Dim, number);
 }
+
 
 __device__ double __cal_Barrier_energy(const double3* _vertexes,
                                        const double3* _rest_vertexes,
@@ -5008,53 +4943,9 @@ __global__ void _reduct_MSelfDist(const double3* _vertexes,
     int4    MMCVIDI = _collisionPairs[idx];
     double  tempv   = _selfConstraintVal(_vertexes, MMCVIDI);
     double2 temp    = make_double2(1.0 / tempv, tempv);
-    int     warpTid = threadIdx.x % 32;
-    int     warpId  = (threadIdx.x >> 5);
-    double  nextTp;
-    int     warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMin = gipc::WARP_SHFL_DOWN(temp.x, i);
-        double tempMax = gipc::WARP_SHFL_DOWN(temp.y, i);
-        temp.x         = __m_max(temp.x, tempMin);
-        temp.y         = __m_max(temp.y, tempMax);
-    }
-    if(warpTid == 0)
-    {
-        sdata[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = sdata[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMin = gipc::WARP_SHFL_DOWN(temp.x, i);
-            double tempMax = gipc::WARP_SHFL_DOWN(temp.y, i);
-            temp.x         = __m_max(temp.x, tempMin);
-            temp.y         = __m_max(temp.y, tempMax);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        _queue[blockIdx.x] = temp;
-    }
+    __blockReduceMax2(temp, sdata, _queue, number);
 }
+
 
 __global__ void _calFrictionGradient_gd(const double3*        _vertexes,
                                         const double3*        _o_vertexes,
@@ -6360,17 +6251,6 @@ __global__ void _calKineticGradient(
     //printf("%f  %f  %f\n", gradient[idx].x, gradient[idx].y, gradient[idx].z);
 }
 
-__global__ void _calKineticEnergy(
-    double3* vertexes, double3* xTilta, double3* gradient, double* masses, int numbers)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx >= numbers)
-        return;
-    double3 deltaX = __GEIGEN__::__minus(vertexes[idx], xTilta[idx]);
-    gradient[idx]  = make_double3(
-        deltaX.x * masses[idx], deltaX.y * masses[idx], deltaX.z * masses[idx]);
-}
-
 __global__ void _computeSoftConstraintGradientAndHessian(const double3* vertexes,
                                                          const double3* targetVert,
                                                          const uint32_t* targetInd,
@@ -6603,78 +6483,7 @@ __global__ void _reduct_MGroundDist(const double3* vertexes,
     double  tempv = dist * dist;
     double2 temp  = make_double2(1.0 / tempv, tempv);
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMin = gipc::WARP_SHFL_DOWN(temp.x, i);
-        double tempMax = gipc::WARP_SHFL_DOWN(temp.y, i);
-        temp.x         = __m_max(temp.x, tempMin);
-        temp.y         = __m_max(temp.y, tempMax);
-    }
-    if(warpTid == 0)
-    {
-        sdata[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = sdata[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMin = gipc::WARP_SHFL_DOWN(temp.x, i);
-            double tempMax = gipc::WARP_SHFL_DOWN(temp.y, i);
-            temp.x         = __m_max(temp.x, tempMin);
-            temp.y         = __m_max(temp.y, tempMax);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        _queue[blockIdx.x] = temp;
-    }
-}
-
-__global__ void _computeSelfCloseVal(const double3*  vertexes,
-                                     const double*   g_offset,
-                                     const double3*  g_normal,
-                                     const uint32_t* _environment_collisionPair,
-                                     double          dTol,
-                                     uint32_t*       _closeConstraintID,
-                                     double*         _closeConstraintVal,
-                                     uint32_t*       _close_gpNum,
-                                     int             number)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx >= number)
-        return;
-    double3 normal = *g_normal;
-    int     gidx   = _environment_collisionPair[idx];
-    double  dist  = __GEIGEN__::__v_vec_dot(normal, vertexes[gidx]) - *g_offset;
-    double  dist2 = dist * dist;
-
-    if(dist2 < dTol)
-    {
-        int tidx                  = gipc::ATOMIC_ADD(_close_gpNum, 1);
-        _closeConstraintID[tidx]  = gidx;
-        _closeConstraintVal[tidx] = dist2;
-    }
+    __blockReduceMax2(temp, sdata, _queue, number);
 }
 
 
@@ -6721,46 +6530,9 @@ __global__ void _getFrictionEnergy_Reduction_3D(double*        squeue,
     double temp = __cal_Friction_energy(
         vertexes, o_vertexes, _collisionPair[idx], dt, distCoord[idx], tanBasis[idx], lastH[idx], fricDHat, eps);
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((numbers - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, numbers);
 }
+
 
 __global__ void _getFrictionEnergy_gd_Reduction_3D(double*        squeue,
                                                    const double3* vertexes,
@@ -6785,46 +6557,9 @@ __global__ void _getFrictionEnergy_gd_Reduction_3D(double*        squeue,
     double temp = __cal_Friction_gd_energy(
         vertexes, o_vertexes, _normal, _collisionPair_gd[idx], dt, lastH[idx], eps);
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((numbers - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, numbers);
 }
+
 
 __global__ void _computeGroundEnergy_Reduction(double*        squeue,
                                                const double3* vertexes,
@@ -6849,47 +6584,9 @@ __global__ void _computeGroundEnergy_Reduction(double*        squeue,
     double  dist2 = dist * dist;
     double  temp  = -(dist2 - dHat) * (dist2 - dHat) * log(dist2 / dHat);
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, number);
 }
+
 
 __global__ void _reduct_min_groundTimeStep_to_double(const double3*  vertexes,
                                                      const uint32_t* surfVertIds,
@@ -6922,51 +6619,9 @@ __global__ void _reduct_min_groundTimeStep_to_double(const double3*  vertexes,
     }
     gipc::SYNC_THREADS();*/
     //printf("%f\n", temp);
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-        //printf("warpNum %d\n", warpNum);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-        temp           = __m_max(temp, tempMin);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-            temp           = __m_max(temp, tempMin);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        minStepSizes[blockIdx.x] = temp;
-        //printf("%f   %d\n", temp, blockIdx.x);
-    }
+    __blockReduceMax(temp, tep, minStepSizes, number);
 }
+
 
 __global__ void _reduct_min_InjectiveTimeStep_to_double(const double3* vertexes,
                                                         const uint4* tetrahedra,
@@ -6995,51 +6650,9 @@ __global__ void _reduct_min_InjectiveTimeStep_to_double(const double3* vertexes,
                                                  ratio,
                                                  errorRate);
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-        //printf("warpNum %d\n", warpNum);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-        temp           = __m_max(temp, tempMin);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-            temp           = __m_max(temp, tempMin);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        minStepSizes[blockIdx.x] = temp;
-        //printf("%f   %d\n", temp, blockIdx.x);
-    }
+    __blockReduceMax(temp, tep, minStepSizes, number);
 }
+
 
 __global__ void _reduct_min_selfTimeStep_to_double(const double3* vertexes,
                                                    const int4* _ccd_collitionPairs,
@@ -7102,49 +6715,9 @@ __global__ void _reduct_min_selfTimeStep_to_double(const double3* vertexes,
                                0);
     }
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-        temp           = __m_max(temp, tempMin);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMin = gipc::WARP_SHFL_DOWN(temp, i);
-            temp           = __m_max(temp, tempMin);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        minStepSizes[blockIdx.x] = temp;
-    }
+    __blockReduceMax(temp, tep, minStepSizes, number);
 }
+
 
 __global__ void _reduct_max_cfl_to_double(const double3* moveDir,
                                           double*        max_double_val,
@@ -7162,49 +6735,9 @@ __global__ void _reduct_max_cfl_to_double(const double3* moveDir,
     double temp = __GEIGEN__::__norm(moveDir[mSVI[idx]]);
 
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        double tempMax = gipc::WARP_SHFL_DOWN(temp, i);
-        temp           = __m_max(temp, tempMax);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            double tempMax = gipc::WARP_SHFL_DOWN(temp, i);
-            temp           = __m_max(temp, tempMax);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        max_double_val[blockIdx.x] = temp;
-    }
+    __blockReduceMax(temp, tep, max_double_val, number);
 }
+
 
 __global__ void _reduct_double3Sqn_to_double(const double3* A, double* D, int number)
 {
@@ -7219,48 +6752,9 @@ __global__ void _reduct_double3Sqn_to_double(const double3* A, double* D, int nu
     double temp = __GEIGEN__::__squaredNorm(A[idx]);
 
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        //double tempMax = gipc::WARP_SHFL_DOWN(temp, i);
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        D[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, D, number);
 }
+
 
 __global__ void _reduct_double3Dot_to_double(const double3* A, const double3* B, double* D, int number)
 {
@@ -7275,48 +6769,9 @@ __global__ void _reduct_double3Dot_to_double(const double3* A, const double3* B,
     double temp = __GEIGEN__::__v_vec_dot(A[idx], B[idx]);
 
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        //double tempMax = gipc::WARP_SHFL_DOWN(temp, i);
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        D[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, D, number);
 }
+
 
 
 __global__ void _getKineticEnergy_Reduction_3D(
@@ -7334,47 +6789,9 @@ __global__ void _getKineticEnergy_Reduction_3D(
         __GEIGEN__::__squaredNorm(__GEIGEN__::__minus(_vertexes[idx], _xTilta[idx]))
         * _masses[idx] * 0.5;
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        _energy[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, _energy, number);
 }
+
 
 
 __global__ void _getBendingEnergy_Reduction(double*        squeue,
@@ -7403,46 +6820,9 @@ __global__ void _getBendingEnergy_Reduction(double*        squeue,
         __cal_bending_energy(vertexes, rest_vertexex, edges[idx], adj, length, bendStiff);
     //double temp = 0;
     //printf("%f    %f\n\n\n", lenRate, volRate);
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((numbers - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, numbers);
 }
+
 
 
 __global__ void _getFEMEnergy_Reduction_3D(double*        squeue,
@@ -7471,46 +6851,9 @@ __global__ void _getFEMEnergy_Reduction_3D(double*        squeue,
 #endif
 
     //printf("%f    %f\n\n\n", lenRate, volRate);
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((numbers - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, numbers);
 }
+
 __global__ void _computeSoftConstraintEnergy_Reduction(double*        squeue,
                                                        const double3* vertexes,
                                                        const double3* targetVert,
@@ -7532,47 +6875,9 @@ __global__ void _computeSoftConstraintEnergy_Reduction(double*        squeue,
     double   d    = motionRate;
     double   temp = d * dis * 0.5;
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((number - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, number);
 }
+
 __global__ void _get_triangleFEMEnergy_Reduction_3D(double*        squeue,
                                                     const double3* vertexes,
                                                     const uint3*   triangles,
@@ -7595,46 +6900,9 @@ __global__ void _get_triangleFEMEnergy_Reduction_3D(double*        squeue,
 
 
     //printf("%f    %f\n\n\n", lenRate, volRate);
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((numbers - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, numbers);
 }
+
 __global__ void _getRestStableNHKEnergy_Reduction_3D(double*       squeue,
                                                      const double* volume,
                                                      int    tetrahedraNum,
@@ -7653,46 +6921,9 @@ __global__ void _getRestStableNHKEnergy_Reduction_3D(double*       squeue,
                     - 0.5 * lenRate * log(4.0)))
                   * volume[idx];
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((numbers - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, numbers);
 }
+
 
 __global__ void _getBarrierEnergy_Reduction_3D(double*        squeue,
                                                const double3* vertexes,
@@ -7713,46 +6944,9 @@ __global__ void _getBarrierEnergy_Reduction_3D(double*        squeue,
     double temp =
         __cal_Barrier_energy(vertexes, rest_vertexes, _collisionPair[idx], _Kappa, _dHat);
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((numbers - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, numbers);
 }
+
 
 __global__ void _getDeltaEnergy_Reduction(double* squeue, const double3* b, const double3* dx, int vertexNum)
 {
@@ -7767,46 +6961,9 @@ __global__ void _getDeltaEnergy_Reduction(double* squeue, const double3* b, cons
 
     double temp = __GEIGEN__::__v_vec_dot(b[idx], dx[idx]);
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((numbers - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        squeue[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, squeue, numbers);
 }
+
 
 __global__ void __add_reduction(double* mem, int numbers)
 {
@@ -7822,46 +6979,9 @@ __global__ void __add_reduction(double* mem, int numbers)
 
     gipc::THREAD_FENCE();
 
-    int    warpTid = threadIdx.x % 32;
-    int    warpId  = (threadIdx.x >> 5);
-    double nextTp;
-    int    warpNum;
-    //int tidNum = 32;
-    if(blockIdx.x == gridDim.x - 1)
-    {
-        //tidNum = numbers - idof;
-        warpNum = ((numbers - idof + 31) >> 5);
-    }
-    else
-    {
-        warpNum = ((blockDim.x) >> 5);
-    }
-    for(int i = 1; i < 32; i = (i << 1))
-    {
-        temp += gipc::WARP_SHFL_DOWN(temp, i);
-    }
-    if(warpTid == 0)
-    {
-        tep[warpId] = temp;
-    }
-    gipc::SYNC_THREADS();
-    if(threadIdx.x >= warpNum)
-        return;
-    if(warpNum > 1)
-    {
-        //	tidNum = warpNum;
-        temp = tep[threadIdx.x];
-        //	warpNum = ((tidNum + 31) >> 5);
-        for(int i = 1; i < warpNum; i = (i << 1))
-        {
-            temp += gipc::WARP_SHFL_DOWN(temp, i);
-        }
-    }
-    if(threadIdx.x == 0)
-    {
-        mem[blockIdx.x] = temp;
-    }
+    __blockReduceSum(temp, tep, mem, numbers);
 }
+
 
 __global__ void _stepForward(double3* _vertexes,
                              double3* _vertexesTemp,
@@ -8638,6 +7758,62 @@ bool GIPC::checkCloseGroundVal()
     return (isChange == 1);
 }
 
+// =============================================================================
+// Second-stage reduction drivers
+//
+// Collapse the per-block partial results of a first-stage reduction kernel
+// down to one scalar on the host (loop of block reductions + one DtoH copy).
+// Shared by all host-side reduction routines below (behavior unchanged).
+// =============================================================================
+
+static double __reducePartialsToScalar_Sum(double* queue, int numbers)
+{
+    const unsigned int threadNum   = default_threads;
+    unsigned int       sharedMsize = sizeof(double) * (threadNum >> 5);
+    int                blockNum    = (numbers + threadNum - 1) / threadNum;
+    while(numbers > 1)
+    {
+        __add_reduction<<<blockNum, threadNum, sharedMsize>>>(queue, numbers);
+        numbers  = blockNum;
+        blockNum = (numbers + threadNum - 1) / threadNum;
+    }
+    double result;
+    cudaMemcpy(&result, queue, sizeof(double), cudaMemcpyDeviceToHost);
+    return result;
+}
+
+static double __reducePartialsToScalar_Max(double* queue, int numbers)
+{
+    const unsigned int threadNum   = default_threads;
+    unsigned int       sharedMsize = sizeof(double) * (threadNum >> 5);
+    int                blockNum    = (numbers + threadNum - 1) / threadNum;
+    while(numbers > 1)
+    {
+        _reduct_max_double<<<blockNum, threadNum, sharedMsize>>>(queue, numbers);
+        numbers  = blockNum;
+        blockNum = (numbers + threadNum - 1) / threadNum;
+    }
+    double result;
+    cudaMemcpy(&result, queue, sizeof(double), cudaMemcpyDeviceToHost);
+    return result;
+}
+
+static double2 __reducePartialsToScalar_Max2(double2* queue, int numbers)
+{
+    const unsigned int threadNum   = default_threads;
+    unsigned int       sharedMsize = sizeof(double2) * (threadNum >> 5);
+    int                blockNum    = (numbers + threadNum - 1) / threadNum;
+    while(numbers > 1)
+    {
+        _reduct_M_double2<<<blockNum, threadNum, sharedMsize>>>(queue, numbers);
+        numbers  = blockNum;
+        blockNum = (numbers + threadNum - 1) / threadNum;
+    }
+    double2 result;
+    cudaMemcpy(&result, queue, sizeof(double2), cudaMemcpyDeviceToHost);
+    return result;
+}
+
 double2 GIPC::minMaxGroundDist()
 {
     //_reduct_minGroundDist << <blockNum, threadNum >> > (_vertexes, _groundOffset, _groundNormal, _isChange, _closeConstraintID, _closeConstraintVal, numbers);
@@ -8657,19 +7833,7 @@ double2 GIPC::minMaxGroundDist()
         _vertexes, _groundOffset, _groundNormal, _environment_collisionPair, _queue, numbers);
     //_reduct_min_double3_to_double << <blockNum, threadNum, sharedMsize >> > (_moveDir, _tempMinMovement, numbers);
 
-    numbers  = blockNum;
-    blockNum = (numbers + threadNum - 1) / threadNum;
-
-    while(numbers > 1)
-    {
-        //_reduct_max_box << <blockNum, threadNum, sharedMsize >> > (_tempLeafBox, numbers);
-        _reduct_M_double2<<<blockNum, threadNum, sharedMsize>>>(_queue, numbers);
-        numbers  = blockNum;
-        blockNum = (numbers + threadNum - 1) / threadNum;
-    }
-    //cudaMemcpy(_leafBoxes, _tempLeafBox, sizeof(AABB), cudaMemcpyDeviceToDevice);
-    double2 minMaxValue;
-    cudaMemcpy(&minMaxValue, _queue, sizeof(double2), cudaMemcpyDeviceToHost);
+    double2 minMaxValue = __reducePartialsToScalar_Max2(_queue, blockNum);
     CUDA_SAFE_CALL(cudaFree(_queue));
     minMaxValue.x = 1.0 / minMaxValue.x;
     return minMaxValue;
@@ -8724,19 +7888,7 @@ double GIPC::self_largestFeasibleStepSize(double slackness, double* mqueue, int 
         _vertexes, _ccd_collisonPairs, _moveDir, mqueue, slackness, numbers);
     //_reduct_min_double3_to_double << <blockNum, threadNum, sharedMsize >> > (_moveDir, _tempMinMovement, numbers);
 
-    numbers  = blockNum;
-    blockNum = (numbers + threadNum - 1) / threadNum;
-
-    while(numbers > 1)
-    {
-        //_reduct_max_box << <blockNum, threadNum, sharedMsize >> > (_tempLeafBox, numbers);
-        _reduct_max_double<<<blockNum, threadNum, sharedMsize>>>(mqueue, numbers);
-        numbers  = blockNum;
-        blockNum = (numbers + threadNum - 1) / threadNum;
-    }
-    //cudaMemcpy(_leafBoxes, _tempLeafBox, sizeof(AABB), cudaMemcpyDeviceToDevice);
-    double minValue;
-    cudaMemcpy(&minValue, mqueue, sizeof(double), cudaMemcpyDeviceToHost);
+    double minValue = __reducePartialsToScalar_Max(mqueue, blockNum);
     //printf("                 full ccd time step:  %f\n", 1.0 / minValue);
     //CUDA_SAFE_CALL(cudaFree(_minSteps));
     return 1.0 / minValue;
@@ -8759,19 +7911,7 @@ double GIPC::cfl_largestSpeed(double* mqueue)
         _moveDir, mqueue, _surfVerts, numbers);
     //_reduct_min_double3_to_double << <blockNum, threadNum, sharedMsize >> > (_moveDir, _tempMinMovement, numbers);
 
-    numbers  = blockNum;
-    blockNum = (numbers + threadNum - 1) / threadNum;
-
-    while(numbers > 1)
-    {
-        //_reduct_max_box << <blockNum, threadNum, sharedMsize >> > (_tempLeafBox, numbers);
-        _reduct_max_double<<<blockNum, threadNum, sharedMsize>>>(mqueue, numbers);
-        numbers  = blockNum;
-        blockNum = (numbers + threadNum - 1) / threadNum;
-    }
-    //cudaMemcpy(_leafBoxes, _tempLeafBox, sizeof(AABB), cudaMemcpyDeviceToDevice);
-    double minValue;
-    cudaMemcpy(&minValue, mqueue, sizeof(double), cudaMemcpyDeviceToHost);
+    double minValue = __reducePartialsToScalar_Max(mqueue, blockNum);
     //CUDA_SAFE_CALL(cudaFree(_maxV));
     return minValue;
 }
@@ -8799,19 +7939,7 @@ double reduction2Kappa(int type, const double3* A, const double3* B, double* _qu
     }
     //_reduct_min_double3_to_double << <blockNum, threadNum, sharedMsize >> > (_moveDir, _tempMinMovement, numbers);
 
-    numbers  = blockNum;
-    blockNum = (numbers + threadNum - 1) / threadNum;
-
-    while(numbers > 1)
-    {
-        //_reduct_max_box << <blockNum, threadNum, sharedMsize >> > (_tempLeafBox, numbers);
-        __add_reduction<<<blockNum, threadNum, sharedMsize>>>(_queue, numbers);
-        numbers  = blockNum;
-        blockNum = (numbers + threadNum - 1) / threadNum;
-    }
-    //cudaMemcpy(_leafBoxes, _tempLeafBox, sizeof(AABB), cudaMemcpyDeviceToDevice);
-    double dotValue;
-    cudaMemcpy(&dotValue, _queue, sizeof(double), cudaMemcpyDeviceToHost);
+    double dotValue = __reducePartialsToScalar_Sum(_queue, blockNum);
     //CUDA_SAFE_CALL(cudaFree(_queue));
     return dotValue;
 }
@@ -8842,19 +7970,7 @@ double GIPC::ground_largestFeasibleStepSize(double slackness, double* mqueue)
         _vertexes, _surfVerts, _groundOffset, _groundNormal, _moveDir, mqueue, slackness, numbers);
 
 
-    numbers  = blockNum;
-    blockNum = (numbers + threadNum - 1) / threadNum;
-
-    while(numbers > 1)
-    {
-        //_reduct_max_box << <blockNum, threadNum, sharedMsize >> > (_tempLeafBox, numbers);
-        _reduct_max_double<<<blockNum, threadNum, sharedMsize>>>(mqueue, numbers);
-        numbers  = blockNum;
-        blockNum = (numbers + threadNum - 1) / threadNum;
-    }
-    //cudaMemcpy(_leafBoxes, _tempLeafBox, sizeof(AABB), cudaMemcpyDeviceToDevice);
-    double minValue;
-    cudaMemcpy(&minValue, mqueue, sizeof(double), cudaMemcpyDeviceToHost);
+    double minValue = __reducePartialsToScalar_Max(mqueue, blockNum);
     //CUDA_SAFE_CALL(cudaFree(_minSteps));
     return 1.0 / minValue;
 }
@@ -8874,19 +7990,7 @@ double GIPC::InjectiveStepSize(double slackness, double errorRate, double* mqueu
         _vertexes, tets, _moveDir, mqueue, slackness, errorRate, numbers);
 
 
-    numbers  = blockNum;
-    blockNum = (numbers + threadNum - 1) / threadNum;
-
-    while(numbers > 1)
-    {
-        //_reduct_max_box << <blockNum, threadNum, sharedMsize >> > (_tempLeafBox, numbers);
-        _reduct_max_double<<<blockNum, threadNum, sharedMsize>>>(mqueue, numbers);
-        numbers  = blockNum;
-        blockNum = (numbers + threadNum - 1) / threadNum;
-    }
-    //cudaMemcpy(_leafBoxes, _tempLeafBox, sizeof(AABB), cudaMemcpyDeviceToDevice);
-    double minValue;
-    cudaMemcpy(&minValue, mqueue, sizeof(double), cudaMemcpyDeviceToHost);
+    double minValue = __reducePartialsToScalar_Max(mqueue, blockNum);
     //printf("Injective Time step:   %f\n", 1.0 / minValue);
     //if (1.0 / minValue < 1) {
     //    system("pause");
@@ -9102,19 +8206,7 @@ double2 GIPC::minMaxSelfDist()
         _vertexes, _collisonPairs, _queue, numbers);
     //_reduct_min_double3_to_double << <blockNum, threadNum, sharedMsize >> > (_moveDir, _tempMinMovement, numbers);
 
-    numbers  = blockNum;
-    blockNum = (numbers + threadNum - 1) / threadNum;
-
-    while(numbers > 1)
-    {
-        //_reduct_max_box << <blockNum, threadNum, sharedMsize >> > (_tempLeafBox, numbers);
-        _reduct_M_double2<<<blockNum, threadNum, sharedMsize>>>(_queue, numbers);
-        numbers  = blockNum;
-        blockNum = (numbers + threadNum - 1) / threadNum;
-    }
-    //cudaMemcpy(_leafBoxes, _tempLeafBox, sizeof(AABB), cudaMemcpyDeviceToDevice);
-    double2 minValue;
-    cudaMemcpy(&minValue, _queue, sizeof(double2), cudaMemcpyDeviceToHost);
+    double2 minValue = __reducePartialsToScalar_Max2(_queue, blockNum);
     CUDA_SAFE_CALL(cudaFree(_queue));
     minValue.x = 1.0 / minValue.x;
     return minValue;
@@ -9171,15 +8263,6 @@ void GIPC::calFrictionGradient(double3* _gradient, device_TetraData& TetMesh)
 
 
 void calKineticGradient(double3* _vertexes, double3* _xTilta, double3* _gradient, double* _masses, int numbers)
-{
-    if(numbers < 1)
-        return;
-    const unsigned int threadNum = default_threads;
-    int                blockNum  = (numbers + threadNum - 1) / threadNum;
-    _calKineticGradient<<<blockNum, threadNum>>>(_vertexes, _xTilta, _gradient, _masses, numbers);
-}
-
-void calKineticEnergy(double3* _vertexes, double3* _xTilta, double3* _gradient, double* _masses, int numbers)
 {
     if(numbers < 1)
         return;
@@ -9307,19 +8390,7 @@ double calcMinMovement(const double3* _moveDir, double* _queue, const int& numbe
     _reduct_max_double3_to_double<<<blockNum, threadNum, sharedMsize>>>(_moveDir, _queue, numbers);
     //CUDA_SAFE_CALL(cudaDeviceSynchronize());
 
-    numbers  = blockNum;
-    blockNum = (numbers + threadNum - 1) / threadNum;
-
-    while(numbers > 1)
-    {
-        //_reduct_max_box << <blockNum, threadNum, sharedMsize >> > (_tempLeafBox, numbers);
-        _reduct_max_double<<<blockNum, threadNum, sharedMsize>>>(_queue, numbers);
-        numbers  = blockNum;
-        blockNum = (numbers + threadNum - 1) / threadNum;
-    }
-    //cudaMemcpy(_leafBoxes, _tempLeafBox, sizeof(AABB), cudaMemcpyDeviceToDevice);
-    double minValue;
-    cudaMemcpy(&minValue, _queue, sizeof(double), cudaMemcpyDeviceToHost);
+    double minValue = __reducePartialsToScalar_Max(_queue, blockNum);
     //CUDA_SAFE_CALL(cudaFree(_tempMinMovement));
     return minValue;
 }
@@ -9847,17 +8918,7 @@ double GIPC::Energy_Add_Reduction_Algorithm(int type, device_TetraData& TetMesh)
             break;
     }
     //CUDA_SAFE_CALL(cudaDeviceSynchronize());
-    numbers  = blockNum;
-    blockNum = (numbers + threadNum - 1) / threadNum;
-
-    while(numbers > 1)
-    {
-        __add_reduction<<<blockNum, threadNum, sharedMsize>>>(queue, numbers);
-        numbers  = blockNum;
-        blockNum = (numbers + threadNum - 1) / threadNum;
-    }
-    double result;
-    cudaMemcpy(&result, queue, sizeof(double), cudaMemcpyDeviceToHost);
+    double result = __reducePartialsToScalar_Sum(queue, blockNum);
     //CUDA_SAFE_CALL(cudaFree(queue));
     return result;
 }
@@ -10564,3 +9625,6 @@ void   GIPC::IPC_Solver(device_TetraData& TetMesh)
     outTime << "totalCgTime: " << total_Cg_count << std::endl;
     outTime.close();
 }
+
+
+
