@@ -8,10 +8,8 @@ This project serves as an excellent benchmark for conducting further research on
 enabling valuable comparisons to be made.
 
 **Authors:** Kemeng Huang, Floyd M. Chitalu, Huancheng Lin, Taku Komura
-**Source code contributor:** [Kemeng Huang](https://kemenghuang.github.io)
 
-> **Note:** this software is released under the MPLv2.0 license.
-> For commercial use, please email the authors for negotiation.
+**Source code contributor:** [Kemeng Huang](https://kemenghuang.github.io)
 
 [![Watch the video](https://github.com/KemengHuang/GPU_IPC/blob/main/Assets/video1.png)](https://youtu.be/5rwp6AiHtrw)
 
