@@ -1,26 +1,139 @@
 # GPU IPC
 
+The first fully GPU-optimized IPC framework — source code of the paper
+**[GIPC: Fast and Stable Gauss-Newton Optimization of IPC Barrier Energy](https://dl.acm.org/doi/10.1145/3643028)**,
+*ACM Transactions on Graphics*, 2024.
 
-DESCRIPTION
-===========
+This project serves as an excellent benchmark for conducting further research on GPU IPC,
+enabling valuable comparisons to be made.
 
-This is the first fully GPU optimized IPC framework and the source code of the paper: [GIPC: Fast and Stable Gauss-Newton Optimization of IPC Barrier Energy](https://dl.acm.org/doi/10.1145/3643028), **ACM Transaction on Graphics, 2024**. This project serves as an excellent benchmark for conducting further research on GPU IPC, enabling valuable comparisons to be made.
+**Authors:** Kemeng Huang, Floyd M. Chitalu, Huancheng Lin, Taku Komura
+**Source code contributor:** [Kemeng Huang](https://kemenghuang.github.io)
 
-authors: Kemeng Huang, Floyd M. Chitalu, Huancheng Lin, Taku Komura
+> **Note:** this software is released under the MPLv2.0 license.
+> For commercial use, please email the authors for negotiation.
 
-Source code contributor: [Kemeng Huang](https://kemenghuang.github.io)
-
-**Note: this software is released under the MPLv2.0 license. For commercial use, please email the authors for negotiation.**
-
-## video 1
 [![Watch the video](https://github.com/KemengHuang/GPU_IPC/blob/main/Assets/video1.png)](https://youtu.be/5rwp6AiHtrw)
 
+---
 
-## BibTex 
+## Requirements
 
-Please cite the following paper if it helps. 
+- **Hardware:** NVIDIA GPU (CUDA-capable)
+- **Platforms:** Windows, Linux
+- **Toolchain:** CMake ≥ 3.18, a C++17 compiler, CUDA Toolkit
+
+| Name     | Version | Usage             | Import         |
+| -------- | ------- | ----------------- | -------------- |
+| CUDA     | ≥ 11.0  | GPU programming   | system install |
+| Eigen3   | 3.4.0   | matrix calculation| package        |
+| freeglut | 3.4.0   | visualization     | package        |
+| GLEW     | 2.2.0   | visualization     | package        |
+
+## Build
+
+### Linux
+
+```bash
+sudo apt install libglew-dev freeglut3-dev libeigen3-dev
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+### Windows
+
+We use [vcpkg](https://github.com/microsoft/vcpkg) to manage dependencies.
+The simplest way to let CMake detect vcpkg is to set the system environment variable
+`CMAKE_TOOLCHAIN_FILE` to `(YOUR_VCPKG_FOLDER)/vcpkg/scripts/buildsystems/vcpkg.cmake`.
+
+```bat
+vcpkg install eigen3 freeglut glew
+
+cmake -S . -B build
+cmake --build build --config Release
+```
+
+> **GPU architecture:** `CMakeLists.txt` targets `CUDA_ARCHITECTURES 86` (Ampere, sm_86)
+> by default. Edit that line to match your GPU
+> (e.g. `89` for Ada/RTX 40xx, `90` for Hopper).
+
+## Run
+
+```bash
+# Linux
+./build/gipc
+# Windows
+build\Release\gipc.exe
+```
+
+A GLUT window opens and starts the default simulation scene (two stacked bunnies
+loaded from `Assets/tetMesh/bunny2.msh`). Asset and output paths are compiled in
+via the `GIPC_ASSETS_DIR` / `GIPC_OUTPUT_DIR` definitions, so the executable can
+be launched from any working directory.
+
+### Viewer controls
+
+| Input        | Action                          |
+| ------------ | ------------------------------- |
+| mouse drag   | rotate view                     |
+| `w` `s` `a` `d` `q` `e` | translate view         |
+| `space`      | pause / resume simulation       |
+| `k`          | toggle surface rendering        |
+| `f`          | toggle BVH rendering            |
+| `9`          | toggle surface export           |
+| `/`          | toggle screenshot capture       |
+
+## Configuration
+
+Simulation parameters live in `Assets/scene/parameterSetting.txt` — material
+properties (density, Young's modulus, Poisson ratio, friction), time step,
+solver tolerances (`pcg_solver_threshold`, `Newton_solver_threshold`), the
+relative collision distance threshold (`IPC_ralative_dHat`), etc. Edit the
+text file and restart; no recompilation needed.
+
+### GPU buffer sizes
+
+It may be necessary to manually adjust the GPU memory buffers to match the
+specific requirements of the simulation scene.
+
+**Collision buffers** are derived from the loaded meshes at startup
+(`gl_main.cpp`, scaled by `collision_detection_buff_scale` in the parameter
+file):
+
+![collision buffer](Assets/collision.JPG)
+
+**Hessian buffers** are sized by the `minCollisionBuffer*` heuristics in
+`BHessian::MALLOC_DEVICE_MEM_O` (`PCG_SOLVER.cu`):
+
+![hessian buffer](Assets/hessian.JPG)
+
+## Project structure
 
 ```
+GPU_IPC/
+├── GIPC.cu/.cuh          # core IPC solver: barrier gradient/Hessian, CCD,
+│                         # line search, Newton main loop
+├── PCG_SOLVER.cu/.cuh    # GPU PCG and MAS-PCG linear solvers
+├── MASPreconditioner.*   # preconditioner assembly
+├── mlbvh.cu/.cuh         # LBVH broad-phase collision detection
+├── ACCD.cu/.cuh          # continuous collision detection
+├── femEnergy.cu/.cuh     # FEM elasticity energy
+├── gpu_eigen_libs.cuh    # header-only fixed-size matrix math (SVD, solver)
+├── GIPC_PDerivative.cuh  # auto-generated analytic energy derivatives
+├── gl_main.cpp           # GLUT viewer and scene setup
+└── load_mesh.*           # mesh I/O
+Assets/
+├── scene/parameterSetting.txt   # simulation parameters
+├── tetMesh/                     # volumetric meshes (.msh)
+└── triMesh/                     # cloth meshes (.obj)
+```
+
+## BibTeX
+
+Please cite the following paper if it helps.
+
+```bibtex
 @article{gipc2024,
 author = {Huang, Kemeng and Chitalu, Floyd M. and Lin, Huancheng and Komura, Taku},
 title = {GIPC: Fast and Stable Gauss-Newton Optimization of IPC Barrier Energy},
@@ -41,44 +154,3 @@ numpages = {18},
 keywords = {IPC, Barrier Hessian, eigen analysis, GPU}
 }
 ```
-
-
-Requirements
-============
-
-Hardware requirements: Nvidia GPUs
-
-Support platforms: Windows, Linux 
-
-## Dependencies
-
-| Name                                   | Version | Usage                                               | Import         |
-| -------------------------------------- | ------- | --------------------------------------------------- | -------------- |
-| cuda                                   | >=11.0  | GPU programming                                     | system install |
-| eigen3                                 | 3.4.0   | matrix calculation                                  | package        |
-| freeglut                               | 3.4.0   | visualization                                       | package        |
-| glew                                   | 2.2.0#3 | visualization                                       | package        |
-
-### linux
-
-We use CMake to build the project.
-
-```bash
-sudo apt install libglew-dev freeglut3-dev libeigen3-dev
-```
-
-
-### Windows
-We use [vcpkg](https://github.com/microsoft/vcpkg) to manage the libraries we need and use CMake to build the project. The simplest way to let CMake detect vcpkg is to set the system environment variable `CMAKE_TOOLCHAIN_FILE` to `(YOUR_VCPKG_PARENT_FOLDER)/vcpkg/scripts/buildsystems/vcpkg.cmake`
-
-```shell
-vcpkg install eigen3 freeglut glew
-```
-
-Settings
-================
-It may be necessary to manually adjust the GPU memory buffer in the source code to match the specific requirements of the simulation scene.
-## collision buffer
-![alt text](https://github.com/KemengHuang/GPU_IPC/blob/main/Assets/collision.JPG)
-## hessian buffer
-![alt text](https://github.com/KemengHuang/GPU_IPC/blob/main/Assets/hessian.JPG)
