@@ -148,7 +148,6 @@ public:
 
 	void GroundCollisionDetect();
     void calBarrierGradientAndHessian(double3* _gradient, double mKappa);
-	void calBarrierHessian();
 	void calBarrierGradient(double3* _gradient, double mKap);
 	void calFrictionHessian(device_TetraData& TetMesh);
 	void calFrictionGradient(double3* _gradient, device_TetraData& TetMesh);
