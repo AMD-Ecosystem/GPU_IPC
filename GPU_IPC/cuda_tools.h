@@ -10,7 +10,7 @@
 #ifndef _CUDA_TOOLS_H
 #define _CUDA_TOOLS_H
 
-#include <cuda_runtime.h>
+#include "cuda_to_hip.h"
 #include <iostream>
 
 #define CUDA_SAFE_CALL(err)     cuda_safe_call_(err, __FILE__, __LINE__)

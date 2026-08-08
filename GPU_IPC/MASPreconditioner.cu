@@ -8,7 +8,6 @@
 
 #include "MASPreconditioner.cuh"
 #include "cuda_tools.h"
-#include "device_launch_parameters.h"
 
 #include <thrust/device_ptr.h>
 #include <thrust/sort.h>
@@ -16,9 +15,13 @@
 #include <vector>
 #include <bitset>
 
+#if defined(USE_HIP) || defined(__HIP_PLATFORM_AMD__)
+#include <hip/hip_cooperative_groups.h>
+#else
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 #include "cooperative_groups.h"
+#endif
 #include "device_utils.h"
 using namespace cooperative_groups;
 //#include "Eigen/Eigen"

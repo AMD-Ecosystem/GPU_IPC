@@ -849,25 +849,143 @@ __GEIGEN__::Matrix3x6d __computePFDmPX3D_3x6_double(const __GEIGEN__::Vector6& P
     return DsPDminvPx;
 }
 
+// Symmetric eigendecomposition by cyclic Jacobi rotations, written against plain arrays.
+// Eigen::SelfAdjointEigenSolver's general compute() path -- what the constructor runs, at
+// every size -- reduces through a Householder tridiagonalization whose inner products are
+// the general matrix product kernels, and those are host-only, so it cannot be instantiated
+// inside a kernel. Only computeDirect(), which exists for 2x2 and 3x3, stays device-side.
+// Jacobi needs no workspace and no matrix product, and is backward stable on the small
+// symmetric blocks projected here.
 template <typename Scalar, int size>
-__device__ void PDSNK(Eigen::Matrix<Scalar, size, size>& symMtr)
+__device__ __host__ void selfAdjointJacobi(const Eigen::Matrix<Scalar, size, size>& symMtr,
+                                           Scalar (&eigenvalues)[size],
+                                           Scalar (&eigenvectors)[size][size])
 {
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<Scalar, size, size>> eigenSolver(symMtr);
-    if(eigenSolver.eigenvalues()[0] >= 0.0)
+    Scalar a[size][size];
+    Scalar scale = 0;
+    for(int i = 0; i < size; i++)
+    {
+        for(int j = 0; j < size; j++)
+        {
+            a[i][j]            = symMtr(i, j);
+            eigenvectors[i][j] = (i == j) ? Scalar(1) : Scalar(0);
+            Scalar mag         = a[i][j] < Scalar(0) ? -a[i][j] : a[i][j];
+            if(mag > scale)
+            {
+                scale = mag;
+            }
+        }
+    }
+
+    // The convergence test below compares sums of squares, so an input whose largest
+    // coefficient exceeds about 1.3e154 makes both sides inf, "inf <= inf" declares
+    // convergence at sweep 0, and a blown-up matrix is returned as a plausible-looking
+    // one instead of propagating. Normalizing keeps the test finite for every finite
+    // input; the eigenvalues are scaled back below. Eigen's solver normalizes too.
+    if(scale > Scalar(0))
+    {
+        for(int i = 0; i < size; i++)
+        {
+            for(int j = 0; j < size; j++)
+            {
+                a[i][j] /= scale;
+            }
+        }
+    }
+
+    const Scalar eps = Eigen::NumTraits<Scalar>::epsilon();
+    for(int sweep = 0; sweep < 32; sweep++)
+    {
+        Scalar off = 0, on = 0;
+        for(int p = 0; p < size; p++)
+        {
+            on += a[p][p] * a[p][p];
+            for(int q = p + 1; q < size; q++)
+            {
+                off += a[p][q] * a[p][q];
+            }
+        }
+        if(off <= eps * eps * (on + off))
+        {
+            break;
+        }
+
+        for(int p = 0; p < size - 1; p++)
+        {
+            for(int q = p + 1; q < size; q++)
+            {
+                if(a[p][q] == Scalar(0))
+                {
+                    continue;
+                }
+                Scalar theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+                Scalar sign  = (theta >= Scalar(0)) ? Scalar(1) : Scalar(-1);
+                Scalar t     = sign / (sign * theta + sqrt(theta * theta + Scalar(1)));
+                Scalar c     = Scalar(1) / sqrt(t * t + Scalar(1));
+                Scalar s     = t * c;
+
+                for(int k = 0; k < size; k++)
+                {
+                    Scalar rp = a[p][k], rq = a[q][k];
+                    a[p][k] = c * rp - s * rq;
+                    a[q][k] = s * rp + c * rq;
+                }
+                for(int k = 0; k < size; k++)
+                {
+                    Scalar cp = a[k][p], cq = a[k][q];
+                    a[k][p] = c * cp - s * cq;
+                    a[k][q] = s * cp + c * cq;
+                }
+                for(int k = 0; k < size; k++)
+                {
+                    Scalar vp = eigenvectors[k][p], vq = eigenvectors[k][q];
+                    eigenvectors[k][p] = c * vp - s * vq;
+                    eigenvectors[k][q] = s * vp + c * vq;
+                }
+            }
+        }
+    }
+
+    for(int i = 0; i < size; i++)
+    {
+        eigenvalues[i] = a[i][i] * scale;
+    }
+}
+
+template <typename Scalar, int size>
+__device__ __host__ void PDSNK(Eigen::Matrix<Scalar, size, size>& symMtr)
+{
+    Scalar eigenvalues[size];
+    Scalar eigenvectors[size][size];
+    selfAdjointJacobi<Scalar, size>(symMtr, eigenvalues, eigenvectors);
+
+    bool anyNegative = false;
+    for(int i = 0; i < size; i++)
+    {
+        if(eigenvalues[i] < Scalar(0))
+        {
+            anyNegative    = true;
+            eigenvalues[i] = 0;
+        }
+    }
+    if(!anyNegative)
     {
         return;
     }
-    Eigen::Matrix<Scalar, size, size> D;
-    D.setZero();
-    int rows = size;  //((size == Eigen::Dynamic) ? symMtr.rows() : size);
-    for(int i = 0; i < rows; i++)
+
+    for(int i = 0; i < size; i++)
     {
-        if(eigenSolver.eigenvalues()[i] > 0.0)
+        for(int j = i; j < size; j++)
         {
-            D(i, i) = eigenSolver.eigenvalues()[i];
+            Scalar sum = 0;
+            for(int k = 0; k < size; k++)
+            {
+                sum += eigenvectors[i][k] * eigenvalues[k] * eigenvectors[j][k];
+            }
+            symMtr(i, j) = sum;
+            symMtr(j, i) = sum;
         }
     }
-    symMtr = eigenSolver.eigenvectors() * D * eigenSolver.eigenvectors().transpose();
 }
 
 __device__
@@ -1045,6 +1163,7 @@ __device__ Eigen::Matrix<double, 9, 9> __project_StabbleNHK_H_3D_makePD(
     for(int i = 0; i != 9; ++i)
         for(int j = 0; j != 9; ++j)
             H.m[i][j] = tempMat(i, j);
+    return tempMat;
 }
 
 __global__ void _calculate_fem_gradient_hessian(__GEIGEN__::Matrix3x3d* DmInverses,

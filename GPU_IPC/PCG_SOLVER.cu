@@ -7,7 +7,6 @@
 //
 
 #include "PCG_SOLVER.cuh"
-#include "device_launch_parameters.h"
 #include "gpu_eigen_libs.cuh"
 #include "cuda_tools.h"
 #include "device_utils.h"
@@ -1211,19 +1210,19 @@ double My_PCG_add_Reduction_Algorithm(int type, device_TetraData* mesh, PCG_Data
     unsigned int sharedMsize = sizeof(double) * (threadNum >> 5);
     switch (type) {
     case 0:
-        PCG_add_Reduction_force << <blockNum, threadNum, sharedMsize >> > (pcg_data->squeue, pcg_data->b, numbers);
+        PCG_add_Reduction_force <<<blockNum, threadNum, sharedMsize >>> (pcg_data->squeue, pcg_data->b, numbers);
         break;
     case 1:
-        PCG_add_Reduction_delta0 << <blockNum, threadNum, sharedMsize >> > (pcg_data->squeue, pcg_data->P, pcg_data->b, mesh->Constraints, numbers);
+        PCG_add_Reduction_delta0 <<<blockNum, threadNum, sharedMsize >>> (pcg_data->squeue, pcg_data->P, pcg_data->b, mesh->Constraints, numbers);
         break;
     case 2:
-        PCG_add_Reduction_deltaN0 << <blockNum, threadNum, sharedMsize >> > (pcg_data->squeue, pcg_data->P, pcg_data->b, pcg_data->r, pcg_data->c, mesh->Constraints, numbers);
+        PCG_add_Reduction_deltaN0 <<<blockNum, threadNum, sharedMsize >>> (pcg_data->squeue, pcg_data->P, pcg_data->b, pcg_data->r, pcg_data->c, mesh->Constraints, numbers);
         break;
     case 3:
-        PCG_add_Reduction_tempSum << <blockNum, threadNum, sharedMsize >> > (pcg_data->squeue, pcg_data->c, pcg_data->q, mesh->Constraints, numbers);
+        PCG_add_Reduction_tempSum <<<blockNum, threadNum, sharedMsize >>> (pcg_data->squeue, pcg_data->c, pcg_data->q, mesh->Constraints, numbers);
         break;
     case 4:
-        PCG_add_Reduction_deltaN << <blockNum, threadNum, sharedMsize >> > (pcg_data->squeue, pcg_data->dx, pcg_data->c, pcg_data->r, pcg_data->q, pcg_data->P, pcg_data->s, alpha, numbers);
+        PCG_add_Reduction_deltaN <<<blockNum, threadNum, sharedMsize >>> (pcg_data->squeue, pcg_data->dx, pcg_data->c, pcg_data->r, pcg_data->q, pcg_data->P, pcg_data->s, alpha, numbers);
         break;
     }
 
@@ -1231,7 +1230,7 @@ double My_PCG_add_Reduction_Algorithm(int type, device_TetraData* mesh, PCG_Data
     blockNum = (numbers + threadNum - 1) / threadNum;
 
     while (numbers > 1) {
-        add_reduction << <blockNum, threadNum, sharedMsize >> > (pcg_data->squeue, numbers);
+        add_reduction <<<blockNum, threadNum, sharedMsize >>> (pcg_data->squeue, numbers);
         numbers = blockNum;
         blockNum = (numbers + threadNum - 1) / threadNum;
 
@@ -1247,28 +1246,28 @@ void Solve_PCG_AX_B(const device_TetraData* mesh, const double3* c, double3* q, 
         return;
     const unsigned int threadNum = default_threads;
     int blockNum = (numbers + threadNum - 1) / threadNum;
-    __PCG_Solve_AX_mass_b << <blockNum, threadNum >> > (mesh->masses, c, q, numbers);
+    __PCG_Solve_AX_mass_b <<<blockNum, threadNum >>> (mesh->masses, c, q, numbers);
     //CUDA_SAFE_CALL(cudaDeviceSynchronize());
     numbers = BH.DNum[3];
     if (numbers > 0) {
         //unsigned int sharedMsize = sizeof(double) * threadNum;
         blockNum = (numbers + threadNum - 1) / threadNum;
-        __PCG_Solve_AX12_b << <blockNum, threadNum >> > (BH.H12x12, BH.D4Index, c, q, numbers);
+        __PCG_Solve_AX12_b <<<blockNum, threadNum >>> (BH.H12x12, BH.D4Index, c, q, numbers);
     }
     numbers = BH.DNum[2];
     if (numbers > 0) {
         blockNum = (numbers + threadNum - 1) / threadNum;
-        __PCG_Solve_AX9_b << <blockNum, threadNum >> > (BH.H9x9, BH.D3Index, c, q, numbers);
+        __PCG_Solve_AX9_b <<<blockNum, threadNum >>> (BH.H9x9, BH.D3Index, c, q, numbers);
     }
     numbers = BH.DNum[1];
     if (numbers > 0) {
         blockNum = (numbers + threadNum - 1) / threadNum;
-        __PCG_Solve_AX6_b << <blockNum, threadNum >> > (BH.H6x6, BH.D2Index, c, q, numbers);
+        __PCG_Solve_AX6_b <<<blockNum, threadNum >>> (BH.H6x6, BH.D2Index, c, q, numbers);
     }
     numbers = BH.DNum[0];
     if (numbers > 0) {
         blockNum = (numbers + threadNum - 1) / threadNum;
-        __PCG_Solve_AX3_b << <blockNum, threadNum >> > (BH.H3x3, BH.D1Index, c, q, numbers);
+        __PCG_Solve_AX3_b <<<blockNum, threadNum >>> (BH.H3x3, BH.D1Index, c, q, numbers);
     }
 
 }
@@ -1279,7 +1278,7 @@ void PCG_Update_Dx_R(const double3* c, double3* dx, const double3* q, double3* r
         return;
     const unsigned int threadNum = default_threads;
     int blockNum = (numbers + threadNum - 1) / threadNum;
-    __PCG_Update_Dx_R << <blockNum, threadNum >> > (c, dx, q, r, rate, numbers);
+    __PCG_Update_Dx_R <<<blockNum, threadNum >>> (c, dx, q, r, rate, numbers);
 }
 
 
@@ -1299,7 +1298,7 @@ double My_PCG_General_v_v_Reduction_Algorithm(device_TetraData* mesh, PCG_Data* 
     blockNum = (numbers + threadNum - 1) / threadNum;
 
     while (numbers > 1) {
-        add_reduction << <blockNum, threadNum, sharedMsize >> > (pcg_data->squeue, numbers);
+        add_reduction <<<blockNum, threadNum, sharedMsize >>> (pcg_data->squeue, numbers);
         numbers = blockNum;
         blockNum = (numbers + threadNum - 1) / threadNum;
 
@@ -1317,14 +1316,14 @@ void Solve_PCG_AX_B2(const device_TetraData* mesh, const double3* c, double3* q,
         return;
     const unsigned int threadNum = default_threads;
     int blockNum = (numbers + threadNum - 1) / threadNum;
-    __PCG_Solve_AX_mass_b << <blockNum, threadNum >> > (mesh->masses, c, q, numbers);
+    __PCG_Solve_AX_mass_b <<<blockNum, threadNum >>> (mesh->masses, c, q, numbers);
 
     int offset4 = (BH.DNum[3] * 144 + threadNum - 1) / threadNum;
     int offset3 = (BH.DNum[2] * 81 + threadNum - 1) / threadNum;
     int offset2 = (BH.DNum[1] * 36 + threadNum - 1) / threadNum;
     int offset1 = (BH.DNum[0] + threadNum - 1) / threadNum;
     blockNum = offset1 + offset2 + offset3 + offset4;
-    __PCG_Solve_AXALL_b2 << <blockNum, threadNum >> > (BH.H12x12, BH.H9x9, BH.H6x6, BH.H3x3, BH.D4Index, BH.D3Index, BH.D2Index, BH.D1Index, c, q, BH.DNum[3] * 144, BH.DNum[2] * 81, BH.DNum[1] * 36, BH.DNum[0], offset4, offset3, offset2);
+    __PCG_Solve_AXALL_b2 <<<blockNum, threadNum >>> (BH.H12x12, BH.H9x9, BH.H6x6, BH.H3x3, BH.D4Index, BH.D3Index, BH.D2Index, BH.D1Index, c, q, BH.DNum[3] * 144, BH.DNum[2] * 81, BH.DNum[1] * 36, BH.DNum[0], offset4, offset3, offset2);
 
 }
 
@@ -1334,31 +1333,31 @@ void construct_P(const device_TetraData* mesh, __GEIGEN__::Matrix3x3d* P, const 
         return;
     const unsigned int threadNum = default_threads;
     int blockNum = (numbers + threadNum - 1) / threadNum;
-    __PCG_mass_P << <blockNum, threadNum >> > (mesh->masses, P, numbers);
+    __PCG_mass_P <<<blockNum, threadNum >>> (mesh->masses, P, numbers);
     //CUDA_SAFE_CALL(cudaDeviceSynchronize());
     numbers = BH.DNum[3] * 12;
     if (numbers > 0) {
         blockNum = (numbers + threadNum - 1) / threadNum;
-        __PCG_AX12_P << <blockNum, threadNum >> > (BH.H12x12, BH.D4Index, P, numbers);
+        __PCG_AX12_P <<<blockNum, threadNum >>> (BH.H12x12, BH.D4Index, P, numbers);
     }
     numbers = BH.DNum[2] * 9;
     if (numbers > 0) {
         blockNum = (numbers + threadNum - 1) / threadNum;
-        __PCG_AX9_P << <blockNum, threadNum >> > (BH.H9x9, BH.D3Index, P, numbers);
+        __PCG_AX9_P <<<blockNum, threadNum >>> (BH.H9x9, BH.D3Index, P, numbers);
     }
     numbers = BH.DNum[1] * 6;
     if (numbers > 0) {
         blockNum = (numbers + threadNum - 1) / threadNum;
-        __PCG_AX6_P << <blockNum, threadNum >> > (BH.H6x6, BH.D2Index, P, numbers);
+        __PCG_AX6_P <<<blockNum, threadNum >>> (BH.H6x6, BH.D2Index, P, numbers);
     }
     numbers = BH.DNum[0] * 3;
     if (numbers > 0) {
         blockNum = (numbers + threadNum - 1) / threadNum;
-        __PCG_AX3_P << <blockNum, threadNum >> > (BH.H3x3, BH.D1Index, P, numbers);
+        __PCG_AX3_P <<<blockNum, threadNum >>> (BH.H3x3, BH.D1Index, P, numbers);
     }
     blockNum = (vertNum + threadNum - 1) / threadNum;
     //__PCG_inverse_P << <blockNum, threadNum >> > (P, vertNum);
-    __PCG_init_P << <blockNum, threadNum >> > (mesh->masses, P, vertNum);
+    __PCG_init_P <<<blockNum, threadNum >>> (mesh->masses, P, vertNum);
 }
 
 void construct_P2(const device_TetraData* mesh, __GEIGEN__::Matrix3x3d* P, const BHessian& BH, int vertNum) {
@@ -1367,15 +1366,15 @@ void construct_P2(const device_TetraData* mesh, __GEIGEN__::Matrix3x3d* P, const
         return;
     const unsigned int threadNum = default_threads;
     int blockNum = (numbers + threadNum - 1) / threadNum;
-    __PCG_mass_P << <blockNum, threadNum >> > (mesh->masses, P, numbers);
+    __PCG_mass_P <<<blockNum, threadNum >>> (mesh->masses, P, numbers);
     //CUDA_SAFE_CALL(cudaDeviceSynchronize());
     numbers = BH.DNum[3] * 12 + BH.DNum[2] * 9 + BH.DNum[1] * 6 + BH.DNum[0] * 3;
     blockNum = (numbers + threadNum - 1) / threadNum;
 
-    __PCG_AXALL_P << <blockNum, threadNum >> > (BH.H12x12, BH.H9x9, BH.H6x6, BH.H3x3, BH.D4Index, BH.D3Index, BH.D2Index, BH.D1Index, P, BH.DNum[3] * 12, BH.DNum[2] * 9, BH.DNum[1] * 6, BH.DNum[0] * 3);
+    __PCG_AXALL_P <<<blockNum, threadNum >>> (BH.H12x12, BH.H9x9, BH.H6x6, BH.H3x3, BH.D4Index, BH.D3Index, BH.D2Index, BH.D1Index, P, BH.DNum[3] * 12, BH.DNum[2] * 9, BH.DNum[1] * 6, BH.DNum[0] * 3);
 
     blockNum = (vertNum + threadNum - 1) / threadNum;
-    __PCG_inverse_P << <blockNum, threadNum >> > (P, vertNum);
+    __PCG_inverse_P <<<blockNum, threadNum >>> (P, vertNum);
     //__PCG_init_P << <blockNum, threadNum >> > (mesh->masses, P, vertNum);
 }
 
@@ -1385,7 +1384,7 @@ void PCG_FinalStep_UpdateC(const device_TetraData* mesh, double3* c, const doubl
         return;
     const unsigned int threadNum = default_threads;
     int blockNum = (numbers + threadNum - 1) / threadNum;
-    __PCG_FinalStep_UpdateC << <blockNum, threadNum >> > (mesh->Constraints, s, c, rate, numbers);
+    __PCG_FinalStep_UpdateC <<<blockNum, threadNum >>> (mesh->Constraints, s, c, rate, numbers);
 }
 
 void PCG_initDX(double3* dx, const double3* z, double rate, int vertexNum) {
@@ -1394,7 +1393,7 @@ void PCG_initDX(double3* dx, const double3* z, double rate, int vertexNum) {
         return;
     const unsigned int threadNum = default_threads;
     int blockNum = (numbers + threadNum - 1) / threadNum;
-    __PCG_initDX << <blockNum, threadNum >> > (dx, z, rate, numbers);
+    __PCG_initDX <<<blockNum, threadNum >>> (dx, z, rate, numbers);
 }
 
 void PCG_constraintFilter(const device_TetraData* mesh, const double3* input, double3* output, int vertexNum) {
@@ -1403,7 +1402,7 @@ void PCG_constraintFilter(const device_TetraData* mesh, const double3* input, do
         return;
     const unsigned int threadNum = default_threads;
     int blockNum = (numbers + threadNum - 1) / threadNum;
-    __PCG_constraintFilter << <blockNum, threadNum >> > (mesh->Constraints, input, output, numbers);
+    __PCG_constraintFilter <<<blockNum, threadNum >>> (mesh->Constraints, input, output, numbers);
 }
 
 int MASPCG_Process(device_TetraData* mesh, PCG_Data* pcg_data, const BHessian& BH, double3* _mvDir, int vertexNum, int tetrahedraNum, double IPC_dt, double meanVolumn, int cpNum, double threshold) {

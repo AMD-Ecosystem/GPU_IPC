@@ -10,10 +10,9 @@
 #include "GL/freeglut.h"
 #include <fstream>
 #include <iostream>
-#include <cuda_runtime.h>
+#include "cuda_to_hip.h"
 #include <map>
 #include "GIPC.cuh"
-#include "device_launch_parameters.h"
 #include "mlbvh.cuh"
 #include <stdio.h>
 #include "load_mesh.h"
@@ -87,7 +86,7 @@ void Init_CUDA()
     cudaError_t cudaStatus = cudaSetDevice(0);
     if(cudaStatus != cudaSuccess)
     {
-        fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
+        fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA/HIP-capable GPU installed?");
         exit(0);
     }
 }

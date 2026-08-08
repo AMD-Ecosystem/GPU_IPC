@@ -46,7 +46,7 @@ keywords = {IPC, Barrier Hessian, eigen analysis, GPU}
 Requirements
 ============
 
-Hardware requirements: Nvidia GPUs
+Hardware requirements: Nvidia GPUs, or AMD GPUs through ROCm
 
 Support platforms: Windows, Linux 
 
@@ -54,10 +54,13 @@ Support platforms: Windows, Linux
 
 | Name                                   | Version | Usage                                               | Import         |
 | -------------------------------------- | ------- | --------------------------------------------------- | -------------- |
-| cuda                                   | >=11.0  | GPU programming                                     | system install |
+| cuda                                   | >=11.0  | GPU programming on Nvidia                           | system install |
+| rocm                                   | >=6.0   | GPU programming on AMD                              | system install |
 | eigen3                                 | 3.4.0   | matrix calculation                                  | package        |
 | freeglut                               | 3.4.0   | visualization                                       | package        |
 | glew                                   | 2.2.0#3 | visualization                                       | package        |
+
+Only one of cuda and rocm is needed. The CUDA build is the default; the ROCm build is selected with `-DUSE_HIP=ON` and is otherwise the same code.
 
 ### linux
 
@@ -65,6 +68,13 @@ We use CMake to build the project.
 
 ```bash
 sudo apt install libglew-dev freeglut3-dev libeigen3-dev
+```
+
+To build for AMD GPUs, configure with `USE_HIP` and name the target architecture (`gfx90a`, `gfx942`, `gfx1100`, ... -- `rocminfo | grep gfx` reports what a machine has).
+
+```bash
+cmake -S . -B build -DUSE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx1100 -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ```
 
 
